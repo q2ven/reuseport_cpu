@@ -147,12 +147,12 @@ close:
 	return err;
 }
 
-static int update_reuseport_map(struct worker *worker)
+static int update_reuseport_map(struct worker *worker, int i)
 {
 	char path[PATH_LEN];
 	int map_fd, err;
 
-	snprintf(path, PATH_LEN, PATH_MAP, PORT_START);
+	snprintf(path, PATH_LEN, PATH_MAP, PORT_START + i);
 
 	/* Load pinned BPF map */
 	map_fd = bpf_obj_get(path);
@@ -168,12 +168,12 @@ static int update_reuseport_map(struct worker *worker)
 	return err;
 }
 
-static int attach_reuseport_prog(struct worker *worker)
+static int attach_reuseport_prog(struct worker *worker, int i)
 {
 	char path[PATH_LEN];
 	int prog_fd, err;
 
-	snprintf(path, PATH_LEN, PATH_PROG, PORT_START);
+	snprintf(path, PATH_LEN, PATH_PROG, PORT_START + i);
 
 	prog_fd = bpf_obj_get(path);
 	if (prog_fd < 0)
@@ -185,6 +185,33 @@ static int attach_reuseport_prog(struct worker *worker)
 		fprintf(stderr, "CPU[%02d]: Failed to attach BPF prog\n", worker->cpu);
 
 	close(prog_fd);
+
+	return err;
+}
+
+static int setup_port(struct worker *worker, int i)
+{
+	int err;
+
+	/* Listen on port PORT_START + i */
+	worker->fd = create_socket(worker->cpu, PORT_START + i);
+	if (worker->fd < 0)
+		return worker->fd;
+
+	/* Update BPF map like: map[cpu_id] = socket_fd */
+	err = update_reuseport_map(worker, i);
+	if (err)
+		goto close;
+
+	/* Attach BPF program to reuseport group */
+	err = attach_reuseport_prog(worker, i);
+	if (err < 0)
+		goto close;
+
+	return 0;
+
+close:
+	close(worker->fd);
 
 	return err;
 }
@@ -205,27 +232,14 @@ struct worker *setup_worker(int cpu)
 		goto err;
 	}
 
-	/* Listen on port PORT_START */
-	worker->fd = create_socket(cpu, PORT_START);
-	if (worker->fd < 0)
-		goto free;
-
 	worker->cpu = cpu;
 
-	/* Update BPF map like: map[cpu_id] = socket_fd */
-	err = update_reuseport_map(worker);
+	err = setup_port(worker, 0);
 	if (err)
-		goto close;
-
-	/* Attach BPF program to reuseport group */
-	err = attach_reuseport_prog(worker);
-	if (err < 0)
-		goto close;
+		goto free;
 
 	return worker;
 
-close:
-	close(worker->fd);
 free:
 	free(worker);
 err:
