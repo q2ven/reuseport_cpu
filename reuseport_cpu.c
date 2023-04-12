@@ -31,6 +31,66 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 	return vfprintf(stderr, format, args);
 }
 
+static int pin_bpf_obj(void)
+{
+	struct reuseport_cpu_bpf *skel;
+	char path[PATH_LEN];
+	int err;
+
+	/* Open BPF skeleton */
+	skel = reuseport_cpu_bpf__open();
+	if (!skel) {
+		fprintf(stderr, "Failed to open BPF skeleton\n");
+		return -1;
+	}
+
+	/* Load & verify BPF programs */
+	err = reuseport_cpu_bpf__load(skel);
+	if (err) {
+		fprintf(stderr, "Failed to load and verify BPF skeleton\n");
+		goto cleanup;
+	}
+
+	snprintf(path, PATH_LEN, PATH_MAP, PORT_START);
+
+	/* Unpin already pinned BPF map */
+	unlink(path);
+
+	/* Pin BPF map */
+	err = bpf_map__pin(skel->maps.reuseport_map, path);
+	if (err) {
+		fprintf(stderr, "Failed to pin BPF map at %s\n", path);
+		goto cleanup;
+	}
+
+	snprintf(path, PATH_LEN, PATH_PROG, PORT_START);
+
+	/* Unpin already pinned BPF prog */
+	unlink(path);
+
+	/* Pin BPF prog */
+	err = bpf_program__pin(skel->progs.migrate_reuseport, path);
+	if (err)
+		fprintf(stderr, "Failed to pin BPF prog at %s\n", path);
+
+cleanup:
+	reuseport_cpu_bpf__destroy(skel);
+
+	return err;
+}
+
+static int setup_parent(void)
+{
+	int err;
+
+	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
+	libbpf_set_print(libbpf_print_fn);
+
+	err = pin_bpf_obj();
+
+	return err;
+}
+
 static int set_affinity(int cpu)
 {
 	cpu_set_t cpu_set;
@@ -231,60 +291,16 @@ static int wait_workers(int nr_worker)
 
 int main(int argc, char **argv)
 {
-	struct reuseport_cpu_bpf *skel;
-	char path[PATH_LEN];
 	int err, nr_worker;
 
-	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
-	libbpf_set_print(libbpf_print_fn);
-
-	/* Open BPF application */
-	skel = reuseport_cpu_bpf__open();
-	if (!skel) {
-		fprintf(stderr, "Failed to open BPF skeleton\n");
-		return -1;
-	}
-
-	/* Load & verify BPF programs */
-	err = reuseport_cpu_bpf__load(skel);
-	if (err) {
-		fprintf(stderr, "Failed to load and verify BPF skeleton\n");
-		goto cleanup;
-	}
-
-	snprintf(path, PATH_LEN, PATH_MAP, PORT_START);
-
-	/* Unpin already pinned BPF map */
-	unlink(path);
-
-	/* Pin BPF map */
-	err = bpf_map__pin(skel->maps.reuseport_map, path);
-	if (err) {
-		fprintf(stderr, "Failed to pin BPF map at %s\n", path);
-		goto cleanup;
-	}
-
-	snprintf(path, PATH_LEN, PATH_PROG, PORT_START);
-
-	/* Unpin already pinned BPF prog */
-	unlink(path);
-
-	/* Pin BPF prog */
-	err = bpf_program__pin(skel->progs.migrate_reuseport, path);
-	if (err) {
-		fprintf(stderr, "Failed to pin BPF prog at %s\n", path);
-		goto cleanup;
-	}
+	err = setup_parent();
+	if (err)
+		return err;
 
 	/* Run workers on each CPU */
 	nr_worker = run_workers();
-	if (!nr_worker)
-		goto cleanup;
+	if (nr_worker)
+		wait_workers(nr_worker);
 
-	wait_workers(nr_worker);
-
-cleanup:
-	reuseport_cpu_bpf__destroy(skel);
-
-	return err;
+	return 0;
 }
