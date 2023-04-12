@@ -18,6 +18,7 @@
 
 #define PATH_LEN	128
 #define PATH_MAP	"/sys/fs/bpf/reuseport_map_%05d"
+#define PATH_PROG	"/sys/fs/bpf/reuseport_prog_%05d"
 
 struct worker {
 	struct reuseport_cpu_bpf *skel;
@@ -205,6 +206,7 @@ static int wait_workers(int nr_worker)
 static int attach_reuseport_prog(struct reuseport_cpu_bpf *skel)
 {
 	int fd, prog_fd, err;
+	char path[PATH_LEN];
 
 	/* We do not insert this socket into BPF map, but we use
 	 * this socket to attach BPF prog to sockets listening on
@@ -215,9 +217,16 @@ static int attach_reuseport_prog(struct reuseport_cpu_bpf *skel)
 	if (fd < 0)
 		return -1;
 
-	prog_fd = bpf_program__fd(skel->progs.migrate_reuseport);
+	snprintf(path, PATH_LEN, PATH_PROG, PORT_START);
+
+	prog_fd = bpf_obj_get(path);
+	if (prog_fd < 0)
+		return prog_fd;
 
 	err = setsockopt(fd, SOL_SOCKET, SO_ATTACH_REUSEPORT_EBPF, &prog_fd, sizeof(prog_fd));
+
+	close(prog_fd);
+
 	if (err) {
 		fprintf(stderr, "Failed to attach BPF prog\n");
 		close(fd);
@@ -259,6 +268,18 @@ int main(int argc, char **argv)
 	err = bpf_map__pin(skel->maps.reuseport_map, path);
 	if (err) {
 		fprintf(stderr, "Failed to pin BPF map at %s\n", path);
+		goto cleanup;
+	}
+
+	snprintf(path, PATH_LEN, PATH_PROG, PORT_START);
+
+	/* Unpin already pinned BPF prog */
+	unlink(path);
+
+	/* Pin BPF prog */
+	err = bpf_program__pin(skel->progs.migrate_reuseport, path);
+	if (err) {
+		fprintf(stderr, "Failed to pin BPF prog at %s\n", path);
 		goto cleanup;
 	}
 
