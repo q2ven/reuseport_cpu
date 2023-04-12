@@ -103,6 +103,27 @@ static int update_reuseport_map(struct worker *worker)
 	return err;
 }
 
+static int attach_reuseport_prog(struct worker *worker)
+{
+	char path[PATH_LEN];
+	int prog_fd, err;
+
+	snprintf(path, PATH_LEN, PATH_PROG, PORT_START);
+
+	prog_fd = bpf_obj_get(path);
+	if (prog_fd < 0)
+		return prog_fd;
+
+	err = setsockopt(worker->fd, SOL_SOCKET, SO_ATTACH_REUSEPORT_EBPF,
+			 &prog_fd, sizeof(prog_fd));
+	if (err)
+		fprintf(stderr, "CPU[%02d]: Failed to attach BPF prog\n", worker->cpu);
+
+	close(prog_fd);
+
+	return err;
+}
+
 struct worker *setup_worker(int cpu)
 {
 	struct worker *worker;
@@ -129,6 +150,11 @@ struct worker *setup_worker(int cpu)
 	/* Update BPF map like: map[cpu_id] = socket_fd */
 	err = update_reuseport_map(worker);
 	if (err)
+		goto close;
+
+	/* Attach BPF program to reuseport group */
+	err = attach_reuseport_prog(worker);
+	if (err < 0)
 		goto close;
 
 	return worker;
@@ -203,44 +229,11 @@ static int wait_workers(int nr_worker)
 		wait(&wstatus);
 }
 
-static int attach_reuseport_prog(struct reuseport_cpu_bpf *skel)
-{
-	int fd, prog_fd, err;
-	char path[PATH_LEN];
-
-	/* We do not insert this socket into BPF map, but we use
-	 * this socket to attach BPF prog to sockets listening on
-	 * port 10000.  We can close this socket if there is alive
-	 * socket, but we keep it open to avoid checking that.
-	 */
-	fd = create_socket(-1, PORT_START);
-	if (fd < 0)
-		return -1;
-
-	snprintf(path, PATH_LEN, PATH_PROG, PORT_START);
-
-	prog_fd = bpf_obj_get(path);
-	if (prog_fd < 0)
-		return prog_fd;
-
-	err = setsockopt(fd, SOL_SOCKET, SO_ATTACH_REUSEPORT_EBPF, &prog_fd, sizeof(prog_fd));
-
-	close(prog_fd);
-
-	if (err) {
-		fprintf(stderr, "Failed to attach BPF prog\n");
-		close(fd);
-		return err;
-	}
-
-	return fd;
-}
-
 int main(int argc, char **argv)
 {
 	struct reuseport_cpu_bpf *skel;
-	int err, nr_worker, fd;
 	char path[PATH_LEN];
+	int err, nr_worker;
 
 	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 	libbpf_set_print(libbpf_print_fn);
@@ -288,14 +281,7 @@ int main(int argc, char **argv)
 	if (!nr_worker)
 		goto cleanup;
 
-	/* Attach BPF program to reuseport group */
-	fd = attach_reuseport_prog(skel);
-	if (fd < 0)
-		goto cleanup;
-
 	wait_workers(nr_worker);
-
-	close(fd);
 
 cleanup:
 	reuseport_cpu_bpf__destroy(skel);
