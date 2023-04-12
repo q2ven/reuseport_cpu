@@ -17,7 +17,7 @@ int migrate_reuseport(struct sk_reuseport_md *reuse_md)
 
 	err = bpf_sk_select_reuseport(reuse_md, &reuseport_map, &cpu, 0);
 
-	bpf_printk("err: %d, cpu: %d", err, cpu);
+	bpf_printk("err: %d, cpu: %02d, port :%05d", err, cpu, reuse_md->sk->src_port);
 
 	return SK_PASS;
 }
