@@ -13,7 +13,11 @@
 #include <bpf/libbpf.h>
 #include "reuseport_cpu.skel.h"
 
+
 #define PORT_START	10000
+
+#define PATH_LEN	128
+#define PATH_MAP	"/sys/fs/bpf/reuseport_map_%05d"
 
 struct worker {
 	struct reuseport_cpu_bpf *skel;
@@ -79,18 +83,26 @@ close:
 
 static int update_reuseport_map(struct worker *worker)
 {
+	char path[PATH_LEN];
 	int map_fd, err;
 
-	map_fd = bpf_map__fd(worker->skel->maps.reuseport_map);
+	snprintf(path, PATH_LEN, PATH_MAP, PORT_START);
+
+	/* Load pinned BPF map */
+	map_fd = bpf_obj_get(path);
+	if (map_fd < 0)
+		return map_fd;
 
 	err = bpf_map_update_elem(map_fd, &worker->cpu, &worker->fd, BPF_NOEXIST);
 	if (err)
-		fprintf(stderr, "CPU[%02d]: Failed to update BPF map", worker->cpu);
+		fprintf(stderr, "CPU[%02d]: Failed to update BPF map\n", worker->cpu);
+
+	close(map_fd);
 
 	return err;
 }
 
-struct worker *setup_worker(struct reuseport_cpu_bpf *skel, int cpu)
+struct worker *setup_worker(int cpu)
 {
 	struct worker *worker;
 	int err;
@@ -111,7 +123,6 @@ struct worker *setup_worker(struct reuseport_cpu_bpf *skel, int cpu)
 	if (worker->fd < 0)
 		goto free;
 
-	worker->skel = skel;
 	worker->cpu = cpu;
 
 	/* Update BPF map like: map[cpu_id] = socket_fd */
@@ -135,7 +146,7 @@ static void teardown_worker(struct worker *worker)
 	free(worker);
 }
 
-static int run_worker(struct reuseport_cpu_bpf *skel, int cpu)
+static int run_worker(int cpu)
 {
 	struct sockaddr_in addr;
 	struct worker *worker;
@@ -143,7 +154,7 @@ static int run_worker(struct reuseport_cpu_bpf *skel, int cpu)
 	char buf[1024];
 	int err;
 
-	worker = setup_worker(skel, cpu);
+	worker = setup_worker(cpu);
 	if (!worker)
 		return -1;
 
@@ -160,7 +171,7 @@ static int run_worker(struct reuseport_cpu_bpf *skel, int cpu)
 	return 0;
 }
 
-static int run_workers(struct reuseport_cpu_bpf *skel)
+static int run_workers()
 {
 	int nr_cpu, i;
 	pid_t pid;
@@ -177,7 +188,7 @@ static int run_workers(struct reuseport_cpu_bpf *skel)
 		}
 
 		if (pid == 0)
-			return run_worker(skel, i);
+			return run_worker(i);
 	}
 
 	return nr_cpu;
@@ -220,6 +231,7 @@ int main(int argc, char **argv)
 {
 	struct reuseport_cpu_bpf *skel;
 	int err, nr_worker, fd;
+	char path[PATH_LEN];
 
 	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 	libbpf_set_print(libbpf_print_fn);
@@ -238,8 +250,20 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
+	snprintf(path, PATH_LEN, PATH_MAP, PORT_START);
+
+	/* Unpin already pinned BPF map */
+	unlink(path);
+
+	/* Pin BPF map */
+	err = bpf_map__pin(skel->maps.reuseport_map, path);
+	if (err) {
+		fprintf(stderr, "Failed to pin BPF map at %s\n", path);
+		goto cleanup;
+	}
+
 	/* Run workers on each CPU */
-	nr_worker = run_workers(skel);
+	nr_worker = run_workers();
 	if (!nr_worker)
 		goto cleanup;
 
