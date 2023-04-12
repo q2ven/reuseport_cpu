@@ -4,6 +4,7 @@
 #include <netinet/in.h>
 #include <sched.h>
 #include <stdio.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -25,6 +26,7 @@ struct worker {
 	struct reuseport_cpu_bpf *skel;
 	int cpu;
 	int fd;
+	int epoll_fd;
 };
 
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
@@ -191,6 +193,10 @@ static int attach_reuseport_prog(struct worker *worker, int i)
 
 static int setup_port(struct worker *worker, int i)
 {
+	struct epoll_event event = {
+		.events = EPOLLIN,
+		.data.u32 = i,
+	};
 	int err;
 
 	/* Listen on port PORT_START + i */
@@ -207,6 +213,13 @@ static int setup_port(struct worker *worker, int i)
 	err = attach_reuseport_prog(worker, i);
 	if (err < 0)
 		goto close;
+
+	err = epoll_ctl(worker->epoll_fd, EPOLL_CTL_ADD, worker->fd, &event);
+	if (err) {
+		fprintf(stderr, "CPU[%02d]: Failed to register socket on %d for epoll\n",
+			worker->cpu, PORT_START + i);
+		goto close;
+	}
 
 	return 0;
 
@@ -233,6 +246,12 @@ struct worker *setup_worker(int cpu)
 	}
 
 	worker->cpu = cpu;
+
+	worker->epoll_fd = epoll_create(PORT_RANGE);
+	if (worker->epoll_fd < 0) {
+		fprintf(stderr, "CPU[%02d]: Failed to create epoll instance\n", cpu);
+		goto free;
+	}
 
 	err = setup_port(worker, 0);
 	if (err)
@@ -265,11 +284,24 @@ static int run_worker(int cpu)
 		return -1;
 
 	while (1) {
-		err = recvfrom(worker->fd, buf, 1024, 0, (struct sockaddr *)&addr, &addrlen);
-		if (err < 0)
-			break;
+		struct epoll_event events[PORT_RANGE];
+		int total, i;
 
-		fprintf(stdout, "CPU[%02d]: Received data: %s\n", worker->cpu, buf);
+		total = epoll_wait(worker->epoll_fd, events, PORT_RANGE, -1);
+		if (total < 0) {
+			fprintf(stderr, "CPU[%02d]: Failed to wait epoll\n", worker->cpu);
+			break;
+		}
+
+		for (i = 0; i < total; i++) {
+			err = recvfrom(worker->fd, buf, 1024, 0,
+				       (struct sockaddr *)&addr, &addrlen);
+			if (err < 0)
+				continue;
+
+			fprintf(stdout, "CPU[%02d]: Received data on %d: %s\n",
+				worker->cpu, PORT_START + events[i].data.u32, buf);
+		}
 	}
 
 	teardown_worker(worker);
