@@ -25,7 +25,7 @@
 struct worker {
 	struct reuseport_cpu_bpf *skel;
 	int cpu;
-	int fd;
+	int fds[PORT_RANGE];
 	int epoll_fd;
 };
 
@@ -161,7 +161,7 @@ static int update_reuseport_map(struct worker *worker, int i)
 	if (map_fd < 0)
 		return map_fd;
 
-	err = bpf_map_update_elem(map_fd, &worker->cpu, &worker->fd, BPF_NOEXIST);
+	err = bpf_map_update_elem(map_fd, &worker->cpu, &worker->fds[i], BPF_NOEXIST);
 	if (err)
 		fprintf(stderr, "CPU[%02d]: Failed to update BPF map\n", worker->cpu);
 
@@ -181,7 +181,7 @@ static int attach_reuseport_prog(struct worker *worker, int i)
 	if (prog_fd < 0)
 		return prog_fd;
 
-	err = setsockopt(worker->fd, SOL_SOCKET, SO_ATTACH_REUSEPORT_EBPF,
+	err = setsockopt(worker->fds[i], SOL_SOCKET, SO_ATTACH_REUSEPORT_EBPF,
 			 &prog_fd, sizeof(prog_fd));
 	if (err)
 		fprintf(stderr, "CPU[%02d]: Failed to attach BPF prog\n", worker->cpu);
@@ -200,9 +200,9 @@ static int setup_port(struct worker *worker, int i)
 	int err;
 
 	/* Listen on port PORT_START + i */
-	worker->fd = create_socket(worker->cpu, PORT_START + i);
-	if (worker->fd < 0)
-		return worker->fd;
+	worker->fds[i] = create_socket(worker->cpu, PORT_START + i);
+	if (worker->fds[i] < 0)
+		return worker->fds[i];
 
 	/* Update BPF map like: map[cpu_id] = socket_fd */
 	err = update_reuseport_map(worker, i);
@@ -214,7 +214,7 @@ static int setup_port(struct worker *worker, int i)
 	if (err < 0)
 		goto close;
 
-	err = epoll_ctl(worker->epoll_fd, EPOLL_CTL_ADD, worker->fd, &event);
+	err = epoll_ctl(worker->epoll_fd, EPOLL_CTL_ADD, worker->fds[i], &event);
 	if (err) {
 		fprintf(stderr, "CPU[%02d]: Failed to register socket on %d for epoll\n",
 			worker->cpu, PORT_START + i);
@@ -224,15 +224,23 @@ static int setup_port(struct worker *worker, int i)
 	return 0;
 
 close:
-	close(worker->fd);
+	close(worker->fds[i]);
 
 	return err;
+}
+
+static void close_sockets(struct worker *worker)
+{
+	int i;
+
+	for (i = 0; i < PORT_RANGE; i++)
+		close(worker->fds[i]);
 }
 
 struct worker *setup_worker(int cpu)
 {
 	struct worker *worker;
-	int err;
+	int err, i;
 
 	/* Bind process on a single CPU */
 	err = set_affinity(cpu);
@@ -253,12 +261,16 @@ struct worker *setup_worker(int cpu)
 		goto free;
 	}
 
-	err = setup_port(worker, 0);
-	if (err)
-		goto free;
+	for (i = 0; i < PORT_RANGE; i++) {
+		err = setup_port(worker, i);
+		if (err)
+			goto close;
+	}
 
 	return worker;
 
+close:
+	close_sockets(worker);
 free:
 	free(worker);
 err:
@@ -267,7 +279,7 @@ err:
 
 static void teardown_worker(struct worker *worker)
 {
-	close(worker->fd);
+	close_sockets(worker);
 	free(worker);
 }
 
@@ -294,7 +306,7 @@ static int run_worker(int cpu)
 		}
 
 		for (i = 0; i < total; i++) {
-			err = recvfrom(worker->fd, buf, 1024, 0,
+			err = recvfrom(worker->fds[events[i].data.u32], buf, 1024, 0,
 				       (struct sockaddr *)&addr, &addrlen);
 			if (err < 0)
 				continue;
