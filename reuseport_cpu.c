@@ -13,6 +13,8 @@
 #include <bpf/libbpf.h>
 #include "reuseport_cpu.skel.h"
 
+#define PORT_START	10000
+
 struct worker {
 	struct reuseport_cpu_bpf *skel;
 	int cpu;
@@ -39,11 +41,10 @@ static int set_affinity(int cpu)
 	return err;
 }
 
-static int create_socket(int cpu)
+static int create_socket(int cpu, int port)
 {
 	struct sockaddr_in addr = {
 		.sin_family = AF_INET,
-		.sin_port = htons(53),
 		.sin_addr.s_addr = htonl(INADDR_ANY),
 	};
 	int fd, err;
@@ -59,6 +60,8 @@ static int create_socket(int cpu)
 		fprintf(stderr, "CPU[%02d]: Failed to set SO_REUSEPORT\n", cpu);
 		goto close;
 	}
+
+	addr.sin_port = htons(port);
 
 	err = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
 	if (err) {
@@ -103,8 +106,8 @@ struct worker *setup_worker(struct reuseport_cpu_bpf *skel, int cpu)
 		goto err;
 	}
 
-	/* Listen on port 53 */
-	worker->fd = create_socket(cpu);
+	/* Listen on port PORT_START */
+	worker->fd = create_socket(cpu, PORT_START);
 	if (worker->fd < 0)
 		goto free;
 
@@ -194,10 +197,10 @@ static int attach_reuseport_prog(struct reuseport_cpu_bpf *skel)
 
 	/* We do not insert this socket into BPF map, but we use
 	 * this socket to attach BPF prog to sockets listening on
-	 * port 53.  We can close this socket if there is alive
+	 * port 10000.  We can close this socket if there is alive
 	 * socket, but we keep it open to avoid checking that.
 	 */
-	fd = create_socket(-1);
+	fd = create_socket(-1, PORT_START);
 	if (fd < 0)
 		return -1;
 
