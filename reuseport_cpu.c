@@ -15,6 +15,7 @@
 
 
 #define PORT_START	10000
+#define PORT_RANGE	32
 
 #define PATH_LEN	128
 #define PATH_MAP	"/sys/fs/bpf/reuseport_map_%05d"
@@ -31,7 +32,7 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 	return vfprintf(stderr, format, args);
 }
 
-static int pin_bpf_obj(void)
+static int pin_bpf_obj(int port)
 {
 	struct reuseport_cpu_bpf *skel;
 	char path[PATH_LEN];
@@ -51,7 +52,7 @@ static int pin_bpf_obj(void)
 		goto cleanup;
 	}
 
-	snprintf(path, PATH_LEN, PATH_MAP, PORT_START);
+	snprintf(path, PATH_LEN, PATH_MAP, port);
 
 	/* Unpin already pinned BPF map */
 	unlink(path);
@@ -63,7 +64,7 @@ static int pin_bpf_obj(void)
 		goto cleanup;
 	}
 
-	snprintf(path, PATH_LEN, PATH_PROG, PORT_START);
+	snprintf(path, PATH_LEN, PATH_PROG, port);
 
 	/* Unpin already pinned BPF prog */
 	unlink(path);
@@ -81,12 +82,16 @@ cleanup:
 
 static int setup_parent(void)
 {
-	int err;
+	int port, err;
 
 	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 	libbpf_set_print(libbpf_print_fn);
 
-	err = pin_bpf_obj();
+	for (port = PORT_START; port < PORT_START + PORT_RANGE; port++) {
+		err = pin_bpf_obj(port);
+		if (err)
+			break;
+	}
 
 	return err;
 }
